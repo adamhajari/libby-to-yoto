@@ -1,0 +1,14 @@
+[project]
+name = "libby-to-yoto"
+version = "0.1.0"
+description = "Download a Libby audiobook and upload it to Yoto as a playlist"
+requires-python = ">=3.11"
+dependencies = [
+    "browser-cookie3>=0.20.1",
+    "pillow>=12.2.0",
+    "playwright>=1.59.0",
+    "requests>=2.33.1",
+]
+
+[project.scripts]
+libby-to-yoto = "libby_to_yoto:main_sync"

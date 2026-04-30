@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.eggs/
+
+# Virtual environments
+.venv
+venv/
+env/
+
+# uv
+.uv/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Playwright / browser automation
+.playwright-mcp/
+
+# Downloaded media / output files
+*.mp3
+*.m4a
+*.mp4
+*.aax
+*.epub
+*.odm
+downloads/
+output/
+
+# Logs
+*.log
+
+# Secrets / credentials
+.env
+.env.*
+secrets.json
+credentials.json
+
+# Network captures / debug dumps
+network_requests.txt
+network_dewey.txt
+network_dewey2.txt
+
+.claude/
+.mcp.json
