@@ -341,22 +341,32 @@ async def navigate_toc(page, capturing: list, on_capture_start=None) -> tuple[in
     return clicked, chapters
 
 
-async def save_cover(page, bdir: Path, title: str) -> Path | None:
+async def save_cover(page, bdir: Path, title: str, matched_idx: int = -1) -> Path | None:
     """Download the cover image shown in the Libby player."""
     title_slug = slug(title)
     cover_dest = bdir / f"{title_slug}.jpg"
     if cover_dest.exists():
         return cover_dest
     try:
-        # Cover images on the shelf page each have alt="Audiobook: '<Title>'. Cover image."
-        # Match by title substring so we pick the right book when multiple covers are visible.
-        src = await page.evaluate("""(title) => {
-            const lower = title.toLowerCase();
-            const img = Array.from(document.querySelectorAll('img[alt*="Cover image"]'))
-                .find(i => i.alt.toLowerCase().includes(lower));
-            return img ? img.src : null;
-        }""", title)
+        # If we know which h3 matched the book, find the nearest cover img relative to it.
+        # Otherwise fall back to the first cover image on the shelf.
+        src = await page.evaluate("""([matchIndex]) => {
+            const imgs = Array.from(document.querySelectorAll('img[alt*="Cover image"]'));
+            if (matchIndex >= 0) {
+                const heading = document.querySelectorAll('h3')[matchIndex];
+                if (heading) {
+                    // Prefer an img that precedes the heading (covers usually render above/before title)
+                    const before = imgs.filter(i => heading.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_PRECEDING);
+                    if (before.length) return before[before.length - 1].src;
+                    // Fall back to the first img after the heading
+                    const after = imgs.find(i => heading.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING);
+                    if (after) return after.src;
+                }
+            }
+            return imgs[0]?.src ?? null;
+        }""", [matched_idx])
         if not src:
+            print(f"  ⚠ No cover image found in shelf DOM for '{title}'")
             return None
         # Shelf serves IMG100; swap to IMG400 for higher resolution.
         src = re.sub(r'IMG100\.JPG', 'IMG400.JPG', src, flags=re.IGNORECASE)
@@ -497,6 +507,9 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
         oa_count = await page.get_by_role("button", name="Open Audiobook").count()
         print(f"  ⚠ Heading not found after scrolling (h3s={h3_count}, 'Open Audiobook' buttons={oa_count})")
 
+    # Grab cover while shelf is still loaded — all book covers are in the DOM here.
+    await save_cover(page, bdir, title, matched_idx)
+
     # Click the "Open Audiobook" button that follows the matched heading in DOM order.
     print(f"Looking for '{title}' on shelf…")
     if matched_idx >= 0:
@@ -516,9 +529,6 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
         """, matched_idx)
     else:
         found = False
-
-    # Grab cover while shelf is loaded — all book covers are in the DOM here.
-    await save_cover(page, bdir, title)
 
     if found:
         print(f"  ✓ Found and opened '{title}'")
