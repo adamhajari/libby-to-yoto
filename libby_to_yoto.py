@@ -355,12 +355,13 @@ async def save_cover(page, bdir: Path, title: str, matched_idx: int = -1) -> Pat
             if (matchIndex >= 0) {
                 const heading = document.querySelectorAll('h3')[matchIndex];
                 if (heading) {
-                    // Prefer an img that precedes the heading (covers usually render above/before title)
-                    const before = imgs.filter(i => heading.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_PRECEDING);
-                    if (before.length) return before[before.length - 1].src;
-                    // Fall back to the first img after the heading
-                    const after = imgs.find(i => heading.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING);
-                    if (after) return after.src;
+                    // Walk up from the heading until we find an ancestor that contains a cover img.
+                    let node = heading.parentElement;
+                    while (node && node !== document.body) {
+                        const img = node.querySelector('img[alt*="Cover image"]');
+                        if (img) return img.src;
+                        node = node.parentElement;
+                    }
                 }
             }
             return imgs[0]?.src ?? null;
