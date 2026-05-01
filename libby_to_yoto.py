@@ -25,14 +25,13 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import urllib.parse
 from pathlib import Path
 
 import browser_cookie3
 import requests
 from PIL import Image as PILImage
-from playwright.async_api import async_playwright, Frame, Page, BrowserContext, expect
+from playwright.async_api import async_playwright, BrowserContext, expect
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -82,10 +81,16 @@ def normalize_cdn_key(url: str) -> str:
     """Normalize a CDN URL for dedupe while keeping meaningful segment params.
 
     Libby rotates signature/auth parameters frequently; those should not create
-    new parts. But some query parameters can identify different segment windows,
-    so keep a stable subset instead of using only path hash.
+    new parts. Overdrive CDN embeds auth tokens directly in the URL path
+    (e.g. /expiretime=...;ctime=...;badurl=.../SIGNATURE/full/bucket/filehash).
+    Strip those by keeping only the stable suffix starting at '/full/'.
     """
     parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    # Overdrive CDN: auth is path-prefixed; stable content starts at /full/
+    stable = re.search(r"/full/.+", path)
+    if stable:
+        path = stable.group(0)
     q = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     keep_keys = {
         "start",
@@ -104,7 +109,7 @@ def normalize_cdn_key(url: str) -> str:
     kept = [(k, v) for (k, v) in q if k.lower() in keep_keys]
     kept.sort()
     query = urllib.parse.urlencode(kept, doseq=True)
-    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    base = f"{parsed.scheme}://{parsed.netloc}{path}"
     return f"{base}?{query}" if query else base
 
 
@@ -145,94 +150,68 @@ async def inject_cookies(ctx: BrowserContext, domain: str):
 # ---------------------------------------------------------------------------
 
 
-async def get_media_current_time_seconds(page: Page) -> float | None:
-    """Prefer HTML audio/video currentTime — matches encoded stream length exactly."""
 
-    async def frame_time(fr: Frame) -> float | None:
-        try:
-            return await fr.evaluate(
-                """() => {
-                    const els = Array.from(document.querySelectorAll("audio, video"));
-                    const playing = els.find(e => !e.paused && !e.ended && e.readyState >= 1);
-                    const el = playing || els.find(e => e.readyState >= 1) || els[0];
-                    if (!el || !Number.isFinite(el.currentTime)) return null;
-                    return el.currentTime;
-                }"""
-            )
-        except Exception:
-            return None
+async def read_chapters_from_toc(frame) -> list[dict]:
+    """Open the player's Table of Contents dialog and parse chapter names + start times.
 
-    # Deepest iframe (Libby embed) usually owns the media element.
-    for fr in reversed(page.frames):
-        t = await frame_time(fr)
-        if t is not None:
-            return float(t)
-    return None
-
-
-async def get_elapsed_seconds(frame, page: Page | None = None) -> float:
-    """Read playback position in seconds from the Libby player.
-
-    Prefer the underlying ``audio`` / ``video`` element's ``currentTime`` when present:
-    it stays aligned with downloaded CDN segments. Parsing nav clock text can grab the
-    wrong H:MM:SS (scrubber bounds, unrelated labels), yielding bogus chapter boundaries.
+    Each TOC row is a <li> with two buttons: the chapter name and the start time.
+    The time button's textContent ends in MM:SS or H:MM:SS, which is far more
+    reliable than scraping the player's running elapsed-time display.
     """
-    if page is not None:
-        media_t = await get_media_current_time_seconds(page)
-        if media_t is not None:
-            return media_t
+    toc_btn = frame.get_by_role("button", name=re.compile(r"Table of Contents", re.IGNORECASE))
+    await toc_btn.first.click()
+
+    heading = frame.get_by_role("heading", name=re.compile(r"^Contents$", re.IGNORECASE))
+    await heading.first.wait_for(timeout=5000)
+    await asyncio.sleep(0.3)  # let the list finish rendering
+
+    rows = await frame.locator("li").evaluate_all(
+        """
+        (items) => items
+            .filter(li => li.querySelectorAll('button').length === 2)
+            .map(li => {
+                const btns = li.querySelectorAll('button');
+                return {
+                    name: (btns[0].textContent || '').trim(),
+                    time_text: (btns[1].textContent || '').trim(),
+                };
+            })
+        """
+    )
+
+    # Each time_text is e.g. "4 minutes 28 seconds04:28" — screen-reader text
+    # then the visible MM:SS or H:MM:SS clock with no separator. Anchor to the end
+    # so we never grab digits from the SR prefix.
+    time_re = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})$")
+    chapters: list[dict] = []
+    for r in rows:
+        m = time_re.search(r["time_text"])
+        if not m:
+            print(f"  ⚠ Could not parse chapter time from {r['time_text']!r}")
+            continue
+        h = int(m.group(1)) if m.group(1) else 0
+        mm = int(m.group(2))
+        ss = int(m.group(3))
+        chapters.append({
+            "name": r["name"],
+            "start_seconds": float(h * 3600 + mm * 60 + ss),
+        })
 
     try:
-        # Two navigation elements exist in the iframe (player nav + assistive menu nav).
-        # .first selects the main player nav which contains the "elapsed" time text.
-        nav = frame.get_by_role("navigation").first
-        text = await nav.text_content(timeout=3000) or ""
-        # Find H:MM:SS immediately after "elapsed" (screen-reader text precedes visual clock)
-        m = re.search(r"elapsed[^0-9]*(\d+):(\d+):(\d+)", text)
-        if m:
-            return float(int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)))
-        # Fallback: MM:SS format when total elapsed < 1 hour
-        m = re.search(r"elapsed[^0-9]*(\d+):(\d+)\b", text)
-        if m:
-            return float(int(m.group(1)) * 60 + int(m.group(2)))
+        await frame.get_by_role("button", name=re.compile(r"Dismiss dialog", re.IGNORECASE)).first.click(timeout=3000)
+        await asyncio.sleep(0.3)
     except Exception:
         pass
-    return 0.0
 
-
-async def wait_stable_playback_position(
-    frame,
-    page: Page,
-    prev_seconds: float,
-    *,
-    timeout_s: float = 20.0,
-) -> float:
-    """After a TOC seek, wait until ``currentTime`` reflects the jump (stable > prev)."""
-
-    deadline = time.monotonic() + timeout_s
-    last: float | None = None
-    stable_hits = 0
-    while time.monotonic() < deadline:
-        pos = await get_elapsed_seconds(frame, page)
-        if pos > prev_seconds + 0.25:
-            if last is not None and abs(pos - last) < 0.75:
-                stable_hits += 1
-                if stable_hits >= 2:
-                    return pos
-            else:
-                stable_hits = 0
-            last = pos
-        await asyncio.sleep(0.25)
-    return await get_elapsed_seconds(frame, page)
+    return chapters
 
 
 async def navigate_toc(page, capturing: list, on_capture_start=None) -> tuple[int, list[dict]]:
     """
-    Rewind to chapter 1 via 'Previous Chapter', enable CDN capture, play, then step
-    forward through every chapter with 'Next Chapter' until the button is gone/disabled.
-    on_capture_start: optional callback invoked (synchronously) just after capturing is enabled.
-    Returns (number_of_chapters_clicked, chapters) where chapters is a list of
-    {"name": str, "start_seconds": float} dicts in book order.
+    Rewind to chapter 1, scrape chapter timestamps from the TOC dialog, then play
+    and step through every chapter with 'Next Chapter' so the CDN fires for each
+    audio segment. on_capture_start: optional callback invoked just after capturing
+    is enabled. Returns (number_of_chapters_clicked, chapters).
     """
     frame = page.frame_locator("iframe")
 
@@ -268,24 +247,16 @@ async def navigate_toc(page, capturing: list, on_capture_start=None) -> tuple[in
         except Exception:
             break  # "Start Of Audiobook [disabled]" — at chapter 1
 
-    # Read chapter 1 name before enabling capture (player is paused at position 0).
-    toc_btn = frame.get_by_role("button", name=re.compile(r"Table of Contents", re.IGNORECASE))
-    chapter_1_label = "Chapter 1"
-    try:
-        raw = await toc_btn.first.inner_text(timeout=5000)
-        # inner_text returns e.g. "Chapter 1\n.\nTABLE OF CONTENTS"; take only the first line.
-        chapter_1_label = raw.split("\n")[0].strip()
-        print(f"  Player position after rewind: {raw.strip()!r}")
-    except Exception:
-        pass
+    # Read chapter timestamps from the TOC dialog (authoritative, no playback needed).
+    chapters = await read_chapters_from_toc(frame)
+    print(f"  Read {len(chapters)} chapters from TOC")
+    for i, ch in enumerate(chapters):
+        print(f"    [{i + 1}] {ch['name'][:60]} @ {ch['start_seconds']:.0f}s")
 
     # Enable CDN capture now that we're at the start.
     capturing[0] = True
     if on_capture_start:
         on_capture_start()
-
-    # Chapter 1 always starts at 0.
-    chapters: list[dict] = [{"name": chapter_1_label, "start_seconds": 0.0}]
 
     # Play so the first segment's CDN request fires.
     play_btn = frame.get_by_role("button", name="Play", exact=True)
@@ -312,14 +283,9 @@ async def navigate_toc(page, capturing: list, on_capture_start=None) -> tuple[in
         if await next_btn.first.is_disabled():
             print("  ✓ Next Chapter disabled — end of book")
             break
-        prev_start = chapters[-1]["start_seconds"]
         await next_btn.first.click()
         clicked += 1
-        pos = await wait_stable_playback_position(frame, page, prev_start)
-        chapter_label = (await toc_btn.first.inner_text()).split("\n")[0].strip()
-        chapters.append({"name": chapter_label, "start_seconds": pos})
-        print(f"  [{clicked}] {chapter_label[:70]} @ {pos:.0f}s")
-        await asyncio.sleep(1.5)  # wait for CDN pre-buffer requests
+        await asyncio.sleep(2.0)  # wait for CDN pre-buffer requests
 
     return clicked, chapters
 
