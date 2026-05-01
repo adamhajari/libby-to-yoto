@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import browser_cookie3
@@ -45,6 +46,7 @@ YOTO_PLAYLISTS = "https://my.yotoplay.com/my-cards/playlists"
 CDN_HOST = "audioclips.cdn.overdrive.com"
 
 CHUNK_MINUTES = 10  # target chunk length
+FUZZY_TITLE_THRESHOLD = 0.6  # min similarity ratio to accept a fuzzy shelf-title match
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,55 @@ CHUNK_MINUTES = 10  # target chunk length
 
 def slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+
+
+def _norm_title(s: str) -> str:
+    # Libby renders titles with non-breaking spaces; collapse all whitespace.
+    return re.sub(r"\s+", " ", s.replace(" ", " ")).strip().lower()
+
+
+def _partial_ratio(short: str, long: str) -> float:
+    """fuzzywuzzy-style partial ratio: best ratio between `short` and any same-length window of `long`."""
+    if not short or not long:
+        return 0.0
+    if len(short) > len(long):
+        short, long = long, short
+    matcher = SequenceMatcher(None, short, long)
+    best = 0.0
+    for block in matcher.get_matching_blocks():
+        long_start = max(0, block.b - block.a)
+        window = long[long_start:long_start + len(short)]
+        r = SequenceMatcher(None, short, window).ratio()
+        if r > best:
+            best = r
+    return best
+
+
+def best_fuzzy_match(
+    target: str, candidates: list[str], threshold: float = FUZZY_TITLE_THRESHOLD
+) -> tuple[int, float] | None:
+    """Return (index, score) of the candidate most similar to target, or None if below threshold.
+
+    A direct substring match in either direction scores 1.0; otherwise we take the
+    higher of full-string similarity and partial-ratio (target aligned to its best
+    window in the candidate), so a short query still matches a long heading.
+    """
+    target_n = _norm_title(target)
+    best_idx, best_score = -1, 0.0
+    for i, c in enumerate(candidates):
+        cand_n = _norm_title(c)
+        if not cand_n:
+            continue
+        if target_n in cand_n or cand_n in target_n:
+            score = 1.0
+        else:
+            full = SequenceMatcher(None, target_n, cand_n).ratio()
+            score = max(full, _partial_ratio(target_n, cand_n))
+        if score > best_score:
+            best_idx, best_score = i, score
+    if best_idx >= 0 and best_score >= threshold:
+        return best_idx, best_score
+    return None
 
 
 def book_dir(title: str) -> Path:
@@ -423,11 +474,20 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
         await page.get_by_role("button", name="Open Audiobook").first.wait_for(timeout=20000)
     except Exception:
         pass
-    # Send real wheel events so Libby's SPA scroll handler fires.
+    # Send real wheel events so Libby's SPA scroll handler fires. Use fuzzy matching
+    # against all visible h3 texts so misspellings or minor punctuation differences
+    # in --title still find the book once it's loaded.
+    matched_idx, matched_score, matched_text = -1, 0.0, ""
     for i in range(30):
-        found_heading = await page.get_by_role("heading", name=re.compile(re.escape(title), re.IGNORECASE)).count()
-        if found_heading:
-            print(f"  ✓ Heading found after {i} scroll steps")
+        headings = await page.locator("h3").evaluate_all("els => els.map(e => e.textContent || '')")
+        match = best_fuzzy_match(title, headings)
+        if match is not None:
+            matched_idx, matched_score = match
+            matched_text = headings[matched_idx]
+            print(
+                f"  ✓ Heading found after {i} scroll steps — "
+                f"'{matched_text[:60]}' (score {matched_score:.2f})"
+            )
             break
         await page.mouse.wheel(0, 800)
         await asyncio.sleep(0.3)
@@ -437,28 +497,25 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
         oa_count = await page.get_by_role("button", name="Open Audiobook").count()
         print(f"  ⚠ Heading not found after scrolling (h3s={h3_count}, 'Open Audiobook' buttons={oa_count})")
 
-    # Find the book by title: locate the h3 whose text contains the title, then click
-    # the first "Open Audiobook" button that follows it in document order.
+    # Click the "Open Audiobook" button that follows the matched heading in DOM order.
     print(f"Looking for '{title}' on shelf…")
-    found = await page.evaluate("""
-        (searchTitle) => {
-            const lower = searchTitle.toLowerCase();
-            const normalize = s => s.replace(/ /g, ' ').toLowerCase();
-            const heading = Array.from(document.querySelectorAll('h3')).find(
-                h => normalize(h.textContent).includes(lower)
-            );
-            if (!heading) return false;
-            const openBtns = Array.from(document.querySelectorAll('button')).filter(
-                b => /open audiobook/i.test(b.textContent + ' ' + (b.getAttribute('aria-label') || ''))
-            );
-            // Pick the first Open Audiobook button that comes after the heading in DOM order
-            const btn = openBtns.find(
-                b => heading.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING
-            );
-            if (btn) { btn.click(); return true; }
-            return false;
-        }
-    """, title)
+    if matched_idx >= 0:
+        found = await page.evaluate("""
+            (matchIndex) => {
+                const heading = document.querySelectorAll('h3')[matchIndex];
+                if (!heading) return false;
+                const openBtns = Array.from(document.querySelectorAll('button')).filter(
+                    b => /open audiobook/i.test(b.textContent + ' ' + (b.getAttribute('aria-label') || ''))
+                );
+                const btn = openBtns.find(
+                    b => heading.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING
+                );
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        """, matched_idx)
+    else:
+        found = False
 
     # Grab cover while shelf is loaded — all book covers are in the DOM here.
     await save_cover(page, bdir, title)
@@ -766,7 +823,7 @@ async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: 
     print("[Upload] Saving playlist…")
     save_btn = page.get_by_role("button", name=re.compile(r"^(save|create)$", re.IGNORECASE)).first
     await save_btn.wait_for(state="visible", timeout=30000)
-    await expect(save_btn).to_be_enabled(timeout=300000)
+    await expect(save_btn).to_be_enabled(timeout=600000)
     await save_btn.click()
     await page.wait_for_load_state("networkidle", timeout=30000)
     print(f"[Upload] ✓ Playlist '{title}' created at {page.url}")
