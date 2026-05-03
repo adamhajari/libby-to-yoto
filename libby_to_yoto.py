@@ -38,8 +38,7 @@ from playwright.async_api import async_playwright, BrowserContext, expect
 # Paths
 # ---------------------------------------------------------------------------
 
-WORKSPACE = Path.home() / ".libby_to_yoto" 
-TMP_UPLOADS = Path("/tmp/libby_to_yoto/uploads")
+WORKSPACE = Path.home() / ".libby_to_yoto"
 
 LIBBY_SHELF = "https://libbyapp.com/shelf"
 YOTO_PLAYLISTS = "https://my.yotoplay.com/my-cards/playlists"
@@ -108,6 +107,12 @@ def best_fuzzy_match(
 
 def book_dir(title: str) -> Path:
     return WORKSPACE / slug(title)
+
+def download_dir(title: str) -> Path:
+    return book_dir(title) / "download"
+
+def upload_dir(title: str) -> Path:
+    return book_dir(title) / "upload"
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -386,9 +391,9 @@ async def save_cover(page, bdir: Path, title: str, matched_idx: int = -1) -> Pat
 
 
 async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = False):
-    bdir = book_dir(title)
-    bdir.mkdir(parents=True, exist_ok=True)
-    manifest_path = bdir / "manifest.json"
+    ddir = download_dir(title)
+    ddir.mkdir(parents=True, exist_ok=True)
+    manifest_path = ddir / "manifest.json"
 
     manifest: dict[str, str] = {}
     if manifest_path.exists():
@@ -417,7 +422,7 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
             part_counter[0] += 1
 
         fname = f"Part{part_num:02d}.mp3"
-        dest = bdir / fname
+        dest = ddir / fname
         print(f"\n  Captured: {Path(urllib.parse.urlsplit(url).path).name}")
         print(f"  → {fname}")
 
@@ -488,17 +493,23 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
     # Send real wheel events so Libby's SPA scroll handler fires. Use fuzzy matching
     # against all visible h3 texts so misspellings or minor punctuation differences
     # in --title still find the book once it's loaded.
-    matched_idx, matched_score, matched_text = -1, 0.0, ""
+    matched_idx, matched_score = -1, 0.0
     for i in range(30):
         headings = await page.locator("h3").evaluate_all("els => els.map(e => e.textContent || '')")
         match = best_fuzzy_match(title, headings)
         if match is not None:
             matched_idx, matched_score = match
-            matched_text = headings[matched_idx]
+            # Extract clean title from the dedicated span, falling back to full textContent
+            clean_titles = await page.locator("h3").evaluate_all(
+                "els => els.map(e => { const s = e.querySelector('.title-tile-title'); return s ? s.textContent : e.textContent; })"
+            )
+            clean_title = clean_titles[matched_idx].replace(" ", " ").strip()
             print(
                 f"  ✓ Heading found after {i} scroll steps — "
-                f"'{matched_text[:60]}' (score {matched_score:.2f})"
+                f"'{clean_title}' (score {matched_score:.2f})"
             )
+            metadata_path = ddir / "metadata.json"
+            metadata_path.write_text(json.dumps({"title": clean_title}, indent=2))
             break
         await page.mouse.wheel(0, 800)
         await asyncio.sleep(0.3)
@@ -509,7 +520,7 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
         print(f"  ⚠ Heading not found after scrolling (h3s={h3_count}, 'Open Audiobook' buttons={oa_count})")
 
     # Grab cover while shelf is still loaded — all book covers are in the DOM here.
-    await save_cover(page, bdir, title, matched_idx)
+    await save_cover(page, ddir, title, matched_idx)
 
     # Click the "Open Audiobook" button that follows the matched heading in DOM order.
     print(f"Looking for '{title}' on shelf…")
@@ -562,7 +573,7 @@ async def phase_download(title: str, ctx: BrowserContext, debug_cdn: bool = Fals
     print(f"\n  TOC navigation complete — {n} entries clicked, {len(chapters)} chapters recorded")
 
     # Save chapter timestamps alongside the manifest.
-    chapters_path = bdir / "chapters.json"
+    chapters_path = ddir / "chapters.json"
     chapters_path.write_text(json.dumps(chapters, indent=2))
     print(f"  ✓ Saved chapter timestamps → {chapters_path.name}")
 
@@ -699,35 +710,35 @@ def _split_by_time(full_mp3: Path, chunk_dir: Path, title_slug: str) -> None:
 
 
 def phase_process(title: str, pad_cover: bool = True, force_split: bool = False):
-    bdir = book_dir(title)
-    manifest_path = bdir / "manifest.json"
+    ddir = download_dir(title)
+    udir = upload_dir(title)
+    manifest_path = ddir / "manifest.json"
 
     if not manifest_path.exists():
         sys.exit(f"No manifest found at {manifest_path}. Run the download phase first.")
 
     manifest: dict[str, str] = json.loads(manifest_path.read_text())
     parts = sorted(manifest.values(), key=lambda n: int(re.search(r"\d+", n).group()))
-    part_paths = [bdir / p for p in parts]
+    part_paths = [ddir / p for p in parts]
     missing = [p for p in part_paths if not p.exists()]
     if missing:
         sys.exit(f"Missing part files: {missing}")
 
     title_slug = slug(title)
-    full_mp3 = bdir / f"{title_slug}_full.mp3"
-    chunk_dir = bdir  # chunks live alongside parts
-    cover_src = bdir / f"{title_slug}.jpg"  # may also be .webp
+    full_mp3 = ddir / f"{title_slug}_full.mp3"
+    cover_src = ddir / f"{title_slug}.jpg"
 
     # --- Stitch ---
     if not full_mp3.exists():
         print(f"\n[Process] Stitching {len(parts)} parts → {full_mp3.name}")
-        concat_list = bdir / "concat.txt"
+        concat_list = ddir / "concat.txt"
         concat_list.write_text("\n".join(f"file '{p.resolve()}'" for p in part_paths))
         ffmpeg("-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", full_mp3)
     else:
         print(f"[Process] Full file already exists — skipping stitch.")
 
     # --- Convert cover .webp → .jpg ---
-    webp_cover = bdir / f"{title_slug}.webp"
+    webp_cover = ddir / f"{title_slug}.webp"
     if webp_cover.exists() and not cover_src.exists():
         print(f"[Process] Converting cover {webp_cover.name} → {cover_src.name}")
         ffmpeg("-i", webp_cover, cover_src)
@@ -740,7 +751,8 @@ def phase_process(title: str, pad_cover: bool = True, force_split: bool = False)
 
     # --- Split into chunks ---
     # Check for both naming schemes (chapter-based and legacy time-based).
-    existing_chunks = _find_chunks(chunk_dir, title_slug)
+    udir.mkdir(parents=True, exist_ok=True)
+    existing_chunks = _find_chunks(udir, title_slug)
     if force_split and existing_chunks:
         print(f"[Process] --force-split: removing {len(existing_chunks)} existing chunks.")
         for p in existing_chunks:
@@ -749,27 +761,20 @@ def phase_process(title: str, pad_cover: bool = True, force_split: bool = False)
     if existing_chunks:
         print(f"[Process] {len(existing_chunks)} chunks already exist — skipping split.")
     else:
-        chapters_path = bdir / "chapters.json"
+        chapters_path = ddir / "chapters.json"
         if chapters_path.exists():
-            _split_by_chapters(full_mp3, chunk_dir, title_slug, chapters_path)
+            _split_by_chapters(full_mp3, udir, title_slug, chapters_path)
         else:
-            _split_by_time(full_mp3, chunk_dir, title_slug)
-        existing_chunks = _find_chunks(chunk_dir, title_slug)
+            _split_by_time(full_mp3, udir, title_slug)
+        existing_chunks = _find_chunks(udir, title_slug)
 
     print(f"[Process] ✓ {len(existing_chunks)} chunks ready.")
 
-    # --- Stage for browser file picker ---
-    upload_dir = TMP_UPLOADS / slug(title)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[Process] Staging files in {upload_dir}")
-    for f in upload_dir.iterdir():
-        f.unlink()
-    for chunk in existing_chunks:
-        shutil.copy2(chunk, upload_dir / chunk.name)
+    # Copy cover into upload dir for the browser file picker
     if cover_src.exists():
-        shutil.copy2(cover_src, upload_dir / cover_src.name)
+        shutil.copy2(cover_src, udir / cover_src.name)
 
-    print(f"[Process] ✓ Staged {len(existing_chunks)} chunks + cover → {upload_dir}")
+    print(f"[Process] ✓ {len(existing_chunks)} chunks + cover in {udir}")
     return existing_chunks, cover_src if cover_src.exists() else None
 
 
@@ -777,8 +782,12 @@ def phase_process(title: str, pad_cover: bool = True, force_split: bool = False)
 # Phase 3 — Upload to Yoto
 # ---------------------------------------------------------------------------
 
-async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: BrowserContext):
-    upload_dir = TMP_UPLOADS / slug(title)
+async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: BrowserContext, user_verify: bool = False):
+    udir = upload_dir(title)
+    metadata_path = download_dir(title) / "metadata.json"
+    if metadata_path.exists():
+        title = json.loads(metadata_path.read_text()).get("title", title)
+        print(f"[Upload] Using Libby title: {title}")
 
     page = await ctx.new_page()
     print(f"\n[Upload] Opening Yoto playlists: {YOTO_PLAYLISTS}")
@@ -803,9 +812,9 @@ async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: 
     await name_field.fill(title)
 
     # Upload audio chunks — "Add audio" is a clickable div that opens a file chooser
-    chunk_paths = sorted(upload_dir.glob("*.mp3"))
+    chunk_paths = sorted(udir.glob("*.mp3"))
     if not chunk_paths:
-        sys.exit(f"No chunk files found in {upload_dir}")
+        sys.exit(f"No chunk files found in {udir}")
 
     print(f"[Upload] Uploading {len(chunk_paths)} audio chunks…")
     async with page.expect_file_chooser() as fc_info:
@@ -819,7 +828,7 @@ async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: 
 
     # Upload cover art — "Upload Art" is a clickable div that opens a file chooser
     if cover and cover.exists():
-        cover_staged = upload_dir / cover.name
+        cover_staged = udir / cover.name
         print(f"[Upload] Uploading cover art: {cover_staged.name}")
         async with page.expect_file_chooser() as fc_info:
             await page.get_by_text("Upload Art").click()
@@ -836,10 +845,13 @@ async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: 
     await save_btn.wait_for(state="visible", timeout=30000)
     await expect(save_btn).to_be_enabled(timeout=600000)
     await save_btn.click()
+    # Wait for navigation away from the edit page (playlist creation POST completes)
+    await page.wait_for_url(lambda url: "edit" not in url, timeout=60000)
     await page.wait_for_load_state("networkidle", timeout=30000)
     print(f"[Upload] ✓ Playlist '{title}' created at {page.url}")
 
-    print("""
+    if user_verify:
+        print("""
 ┌─────────────────────────────────────────────────────────────────┐
 │  Please verify in the browser:                                   │
 │   • Track order matches the audiobook                           │
@@ -848,7 +860,7 @@ async def phase_upload(title: str, chunks: list[Path], cover: Path | None, ctx: 
 │  Press ENTER to close the browser.                              │
 └─────────────────────────────────────────────────────────────────┘
 """)
-    await asyncio.get_event_loop().run_in_executor(None, input, "Press ENTER to finish… ")
+        await asyncio.get_event_loop().run_in_executor(None, input, "Press ENTER to finish… ")
     await page.close()
 
 
@@ -870,6 +882,11 @@ async def main():
         "--debug-cdn",
         action="store_true",
         help="Log every observed Libby CDN URL key during download",
+    )
+    parser.add_argument(
+        "--user-verify",
+        action="store_true",
+        help="Pause after upload and prompt the user to verify the playlist in the browser before closing",
     )
     args = parser.parse_args()
 
@@ -922,12 +939,11 @@ async def main():
         if phase in ("all", "upload"):
             if chunks is None:
                 # Load from disk if we skipped process phase
-                bdir = book_dir(title)
                 title_slug = slug(title)
-                chunks = _find_chunks(bdir, title_slug)
-                cover_path = bdir / f"{title_slug}.jpg"
+                chunks = _find_chunks(upload_dir(title), title_slug)
+                cover_path = download_dir(title) / f"{title_slug}.jpg"
                 cover = cover_path if cover_path.exists() else None
-            await phase_upload(title, chunks, cover, ctx)
+            await phase_upload(title, chunks, cover, ctx, user_verify=args.user_verify)
 
         await ctx.close()
 

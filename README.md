@@ -71,6 +71,53 @@ Opens the Yoto playlist editor, creates a new playlist named after the book, upl
 /tmp/libby_to_yoto/uploads/<book-slug>/   # staged for browser file picker
 ```
 
+## libby-borrow
+
+A companion script for browsing your Libby libraries without downloading anything.
+
+### Search and borrow
+
+```bash
+# Search for an audiobook and borrow it immediately if available
+python libby_borrow.py "Harry Potter and the Prisoner of Azkaban"
+
+# Search for an ebook instead
+python libby_borrow.py "Harry Potter and the Prisoner of Azkaban" --ebook
+```
+
+If the title is available, it borrows it on the spot. If it's on a wait list, it reports the estimated hold time and which library card has the shortest wait.
+
+Fuzzy title matching is used to verify the result actually matches your query before borrowing anything.
+
+### Search only
+
+```bash
+# Show availability across all your library cards without borrowing
+python libby_borrow.py "Harry Potter and the Prisoner of Azkaban" --search-only
+
+# Same for ebooks
+python libby_borrow.py "Harry Potter and the Prisoner of Azkaban" --ebook --search-only
+```
+
+Reports availability at each of your library cards, including estimated wait times:
+
+```
+Availability report for: 'Harry Potter and the Prisoner of Azkaban'
+
+  Audiobook:
+    ✓ Available soon  —  Northern California Digital Library
+    ✓ Available soon  —  New York Public Library
+    ~ About 11 weeks wait  —  Seattle Public Library
+    ✗ No copies  —  Valley Digital Library
+```
+
+### Flags
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--search-only` | `-s` | Report availability without borrowing |
+| `--ebook` | `-e` | Search for an ebook instead of an audiobook |
+
 ## Notes
 
 - Neither Libby nor Yoto expose public APIs — everything is driven through a real browser via Playwright.

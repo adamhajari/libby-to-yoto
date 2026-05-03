@@ -1,6 +1,6 @@
 [project]
 name = "libby-to-yoto"
-version = "0.3.0"
+version = "0.4.0"
 description = "Download a Libby audiobook and upload it to Yoto as a playlist"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,9 @@ dependencies = [
     "playwright>=1.59.0",
     "requests>=2.33.1",
 ]
+
+[tool.setuptools]
+py-modules = ["libby_to_yoto"]
 
 [project.scripts]
 libby-to-yoto = "libby_to_yoto:main_sync"

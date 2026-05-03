@@ -43,15 +43,15 @@ Notes:
 
 ### Recommended local file layout
 
-- Per-book work folder: /home/adam/.libby\_to\_yoto/workspace/libby\_to\_yoto  
+- Per-book work folder: /home/user/.libby\_to\_yoto/workspace/libby\_to\_yoto  
 - /\<book-slug\>/  
-- Source parts: /home/adam/.libby\_to\_yoto/workspace/libby\_to\_yoto  
+- Source parts: /home/user/.libby\_to\_yoto/workspace/libby\_to\_yoto  
 - /\<book-slug\>/Part01.mp3, Part02.mp3, etc.  
-- Full stitched file: /home/adam/.libby\_to\_yoto/workspace/libby\_to\_yoto  
+- Full stitched file: /home/user/.libby\_to\_yoto/workspace/libby\_to\_yoto  
 - /\<book-slug\>/\<title\>\_full.mp3  
-- Chunk output: /home/adam/.libby\_to\_yoto/workspace/libby\_to\_yoto  
+- Chunk output: /home/user/.libby\_to\_yoto/workspace/libby\_to\_yoto  
 - /\<book-slug\>/\<title\>\_chunk\_000.mp3, \<title\>\_chunk\_001.mp3, etc.  
-- Cover image: /home/adam/.libby\_to\_yoto/workspace/libby\_to\_yoto  
+- Cover image: /home/user/.libby\_to\_yoto/workspace/libby\_to\_yoto  
 - /\<book-slug\>/\<title\>.jpg  
 - Upload staging for browser file pickers: /tmp/libby\_to\_yoto/uploads/\<book-slug\>/
 
