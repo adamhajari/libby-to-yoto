@@ -118,6 +118,18 @@ Availability report for: 'Harry Potter and the Prisoner of Azkaban'
 | `--search-only` | `-s` | Report availability without borrowing |
 | `--ebook` | `-e` | Search for an ebook instead of an audiobook |
 
+## yoto-tools
+
+Utilities for inspecting your Yoto account.
+
+### List playlists
+
+```bash
+python yoto_tools.py list-playlists
+```
+
+Prints the title of every playlist in your Yoto account.
+
 ## Notes
 
 - Neither Libby nor Yoto expose public APIs — everything is driven through a real browser via Playwright.
