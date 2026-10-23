@@ -130,7 +130,7 @@ python yoto_tools.py list-playlists
 
 Prints the title of every playlist in your Yoto account.
 
-## Notes
+## Notes 
 
 - Neither Libby nor Yoto expose public APIs — everything is driven through a real browser via Playwright.
 - The persistent Chromium profile at `~/.libby_to_yoto/chromium-profile` carries your login sessions across runs. Log in to Libby and Yoto there once.
